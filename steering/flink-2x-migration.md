@@ -605,6 +605,17 @@ New DataStream API with improved design (not yet production-ready):
 | IterativeStream | Supported | Removed |
 | keyBy(int) | Supported | Removed (use KeySelector) |
 
+## Not Supported Features in Managed Service for Apache Flink
+
+The following Flink 2.2 features are not currently supported in Managed Service for Apache Flink as they are still considered experimental in Apache Flink: 
+
+* Materialized Tables
+* ForSt State Backend (disaggregated state storage)
+* Java 21
+* Custom metric reporters/telemetry configurations
+
+For details on which features are supported in Managed Service for Apache Flink, refer to  [Apache Flink 2.2 features supported](https://docs.aws.amazon.com/managed-flink/latest/java/flink-2-2.html#flink-2-2-supported-features). 
+
 ## References
 
 - [Flink 2.0 Release Announcement](https://flink.apache.org/2025/03/24/apache-flink-2.0.0-a-new-era-of-real-time-data-processing/)

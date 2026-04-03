@@ -17,7 +17,7 @@ Not all connector versions are published for every Flink version. Use the correc
 | `target.java.version` | `11` | `17` | Flink 2.x requires Java 17 minimum |
 | `flink-connector-kafka` | `3.4.0-1.20` | `4.0.1-2.0` | Connector uses separate versioning scheme |
 | `flink-connector-aws-kinesis-streams` | `5.1.0-1.20` | `6.0.0-2.0` | Connector uses separate versioning scheme |
-| `flink-statebackend-rocksdb` | `1.20.3` (uses `flink.version`) | `2.2.0` (uses `flink.version`) | Available for both; Flink 2.x also offers `flink-statebackend-forst` |
+| `flink-statebackend-rocksdb` | `1.20.3` (uses `flink.version`) | `2.2.0` (uses `flink.version`) | Available for both, can also use HashMap state backend via support case in MSF for apps that have small states that can fit in memory and benefit from lower latency state access |
 | `aws-kinesisanalytics-runtime` | `1.2.0` | `1.2.0` | Same version for both |
 | `aws-msk-iam-auth` | `2.3.5` | `2.3.5` | Version-agnostic |
 | `maven-compiler-plugin` | `3.8.1` | `3.11.0` | Newer version recommended for Java 17 |
