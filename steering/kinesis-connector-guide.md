@@ -198,6 +198,43 @@ sourceConfig.set(KinesisSourceConfigOptions.EFO_DESCRIBE_CONSUMER_RETRY_STRATEGY
 sourceConfig.set(KinesisSourceConfigOptions.EFO_DESCRIBE_CONSUMER_RETRY_STRATEGY_MAX_DELAY, Duration.ofSeconds(10));
 ```
 
+## Migrating from Legacy Kinesis Consumer to KinesisStreamsSource
+
+**CRITICAL for Flink 2.x upgrades:** KDS connector versions below 5.0 have state that is incompatible with the Flink 2.2 connector (v6.0.0-2.0). You must migrate to connector v5.0+ on Flink 1.x before upgrading to Flink 2.x. See the [AWS blog post on the new Kinesis source connector](https://aws.amazon.com/blogs/big-data/introducing-the-new-amazon-kinesis-source-connector-for-apache-flink/) for full details.
+
+The legacy `FlinkKinesisConsumer` uses the removed `SourceFunction` interface and will not work with Flink 2.x. The new `KinesisStreamsSource` uses the FLIP-27 Source API.
+
+### Migration Paths
+
+**DataStream API with operator UIDs defined:**
+1. Update dependencies: replace `flink-connector-kinesis` with `flink-connector-aws-kinesis-streams` v5.0.0+
+2. Replace `FlinkKinesisConsumer` with `KinesisStreamsSource` builder pattern
+3. Change the UID of the source operator to a new string (this selectively resets source state while preserving all other operator state)
+4. Configure starting position with `AT_TIMESTAMP` set to just before deployment time
+5. Deploy with `allowNonRestoredState = true`
+
+**Table API/SQL or DataStream without operator UIDs:**
+1. Update dependencies and code as above
+2. Deploy with `SKIP_RESTORE_FROM_SNAPSHOT` since Flink cannot map old operator state to new operators
+3. After the application is running, switch back to `RESTORE_FROM_LATEST_SNAPSHOT` for future restarts
+
+### Key Differences from Legacy Connector
+
+| Feature | Legacy `FlinkKinesisConsumer` | New `KinesisStreamsSource` |
+|---------|-------------------------------|---------------------------|
+| Interface | `SourceFunction` (removed in 2.x) | FLIP-27 Source API |
+| Stream identifier | Stream name | Stream ARN (cross-region/account support) |
+| Watermarks | Implicit defaults | Explicit `WatermarkStrategy` required |
+| Ordering on reshard | Not guaranteed | Guaranteed via parent-child shard lineage |
+| Shard assigner | Even shard distribution | Uniform partition-key distribution |
+| AWS SDK | v1 | v2 (non-blocking I/O) |
+| JAR size | ~60 MB | ~200 KB |
+| KCL/KPL dependency | Included | Removed (no built-in KPL de-aggregation) |
+
+### State Compatibility Warning
+
+The saved state from `FlinkKinesisConsumer` is not compatible with `KinesisStreamsSource`. You cannot restore source position from a snapshot taken with the legacy connector. Plan for either selective state reset (with UIDs) or full state reset (without UIDs) as described above.
+
 ## Authentication
 
 In Managed Service for Apache Flink, authentication to Kinesis is handled automatically via the application's IAM execution role. No explicit credentials configuration is needed in the code.

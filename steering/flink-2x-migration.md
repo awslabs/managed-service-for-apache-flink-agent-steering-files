@@ -19,6 +19,9 @@ This guide covers migrating Flink applications from 1.x to 2.x. Key changes: Jav
 | Config | `flink-conf.yaml` removed | Must use `config.yaml` (standard YAML) |
 | Time API | `Time` class deprecated | Use `java.time.Duration` |
 | Serialization | Kryo 2.x → 5.x, new collection serializers | State incompatibility (see below) |
+| DataSet API | Entire DataSet API removed | Migrate to DataStream or Table API/SQL |
+| Scala API | Scala API removed entirely | Use Java API (callable from Scala) |
+| Python | Python 3.8 removed, Python 3.12 default | Update Python runtime |
 | DataStream | `IterativeStream`, `TimeCharacteristic` removed | Refactor required |
 
 ## Dependency Changes
@@ -250,14 +253,17 @@ Three serialization incompatibilities prevent state migration from 1.x to 2.x:
 - Timer state (event-time and processing-time)
 
 **Connectors:**
-- Kinesis connector state (default polling and Enhanced Fan-Out)
+- Kinesis connector state (v5.0+ only — see note below; default polling and Enhanced Fan-Out)
 - Kafka connector state (offsets, partition tracking)
 
-**Table API/SQL:**
+**CRITICAL — Kinesis Connector Version Prerequisite:** KDS connector versions below 5.0 maintain state that is incompatible with the Flink 2.2 Kinesis connector (v6.0.0-2.0). You must migrate to connector v5.0+ on Flink 1.x before upgrading to Flink 2.x. See `kinesis-connector-guide.md` for migration paths and the [AWS blog post](https://aws.amazon.com/blogs/big-data/introducing-the-new-amazon-kinesis-source-connector-for-apache-flink/) for details.
+
+**Table API/SQL (with caveat):**
 - All tested patterns compatible: GROUP BY, window aggregations (TUMBLE, HOP, SESSION)
 - Stream joins (INNER, LEFT OUTER), Top-N, deduplication
 - DISTINCT aggregations, OVER windows
 - Table API provides alternative migration path avoiding DataStream serialization issues
+- **Caveat:** Apache Flink does not guarantee state compatibility between major versions for Table API applications. Always test in a non-production environment first.
 
 ### Incompatible Patterns (State Migration Fails)
 
@@ -286,6 +292,29 @@ public class UserSession {
     public Queue<Event> eventQueue;        // BREAKS
 }
 ```
+
+**Scala Case Classes:**
+```scala
+// INCOMPATIBLE - Serialized via Kryo in Flink 1.x, Kryo v2→v5 binary format change breaks state
+case class UserEvent(userId: String, eventType: String, timestamp: Long)
+```
+
+**Java Records:**
+```java
+// INCOMPATIBLE - Typically fall back to Kryo serialization in Flink 1.x
+// Verify by testing with env.getConfig().disableGenericTypes()
+public record UserEvent(String userId, String eventType, long timestamp) {}
+```
+
+**Third-Party Library Types:**
+```java
+// INCOMPATIBLE - Types without a registered custom serializer fall back to Kryo
+// The Kryo v2→v5 binary format change breaks all Kryo-serialized state
+ValueState<ThirdPartyType> state; // Any type from external libraries using Kryo fallback
+```
+
+**Any Type Using Kryo Fallback:**
+If Flink cannot handle a type with a built-in or registered serializer, it falls back to Kryo. All Kryo-serialized state from 1.x is incompatible with 2.2. Use `env.getConfig().disableGenericTypes()` during development to detect Kryo fallback.
 
 ### Failure Behavior and Detection
 
@@ -423,6 +452,119 @@ StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironm
 env.getConfig().disableGenericTypes(); // Throws exception if Kryo would be used
 ```
 
+## MSF Upgrade Workflow
+
+### Understanding Migration Paths
+
+Your upgrade experience depends on your application's compatibility with Flink 2.2:
+
+**Path 1: Compatible binary and state** — Invoke the Upgrade operation. Application transitions RUNNING → UPDATING → RUNNING with full state preservation. Same experience as minor version migrations. Best for stateless applications or those using compatible serialization (Avro, Protobuf, simple POJOs without collections).
+
+**Path 2: Binary incompatibilities** — Upgrade operation fails and surfaces the incompatibility through Operations API and logs. With auto-rollback enabled, the application automatically rolls back within minutes. With auto-rollback disabled, the application remains running without processing data until you manually roll back. Fix the binary issues, then re-attempt for a Path 1 experience.
+
+**Path 3: Incompatible application state** — Upgrade appears to succeed initially, but the application enters restart loops within seconds as state restoration fails. Detect via CloudWatch metrics (`numRestarts` increasing, `runningTime` not increasing). Manually invoke the Rollback operation, then review the State Compatibility section above.
+
+### Upgrade Phases
+
+**Phase 1: Preparation**
+1. Update application code for Flink 2.2 compatibility (dependencies, removed APIs, Java 17)
+2. Build the new JAR and upload to S3 with a different file name (e.g., `my-app-flink-2.2.jar`)
+
+**Phase 2: Enable auto-rollback**
+
+Check and enable auto-rollback before upgrading:
+```bash
+# Check auto-rollback status
+aws kinesisanalyticsv2 describe-application \
+    --application-name MyApplication \
+    --query 'ApplicationDetail.ApplicationConfigurationDescription.ApplicationSystemRollbackConfigurationDescription.RollbackEnabled'
+
+# Enable if not already enabled
+aws kinesisanalyticsv2 update-application \
+    --application-name MyApplication \
+    --current-application-version-id <version-id> \
+    --application-configuration-update '{
+        "ApplicationSystemRollbackConfigurationUpdate": {
+            "RollbackEnabledUpdate": true
+        }
+    }'
+```
+
+**Phase 3: Take snapshot**
+
+If automatic snapshots are enabled, you can skip this. Otherwise, take a snapshot before upgrading:
+```bash
+aws kinesisanalyticsv2 create-application-snapshot \
+    --application-name MyApplication \
+    --snapshot-name pre-flink-2.2-upgrade
+
+# Wait until READY
+aws kinesisanalyticsv2 describe-application-snapshot \
+    --application-name MyApplication \
+    --snapshot-name pre-flink-2.2-upgrade
+```
+
+**Phase 4: Upgrade application**
+
+You can upgrade from RUNNING or READY state using the UpdateApplication API:
+```bash
+aws kinesisanalyticsv2 update-application \
+    --application-name MyApplication \
+    --current-application-version-id <version-id> \
+    --runtime-environment-update FLINK-2_2 \
+    --application-configuration-update '{
+        "ApplicationCodeConfigurationUpdate": {
+            "CodeContentUpdate": {
+                "S3ContentLocationUpdate": {
+                    "FileKeyUpdate": "my-app-flink-2.2.jar"
+                }
+            }
+        }
+    }'
+```
+
+CloudFormation also supports in-place upgrades — update the `RuntimeEnvironment` field and CloudFormation will update in place without deleting and recreating the application (preserving snapshots and history).
+
+**Phase 5: Monitor upgrade**
+- Use the Operations API to check upgrade status and surface binary incompatibilities
+- If the application is RUNNING but still on the older runtime, auto-rollback kicked in — check Operations API for the failure reason
+- Monitor CloudWatch metrics:
+  - `numRestarts`: should be zero after upgrade
+  - `runningTime`: should be steadily increasing (replaces deprecated `uptime`)
+  - `lastCheckpointDuration`: should be similar to pre-upgrade values
+  - `numberOfFailedCheckpoints`: should remain at 0
+
+**Phase 6: Validate (run 24+ hours)**
+- Verify data flowing through sources and sinks
+- Compare output with pre-upgrade baseline
+- Monitor latency, throughput, checkpoint duration/size, memory/CPU utilization
+
+### Rollback Procedures
+
+**Automatic rollback:** If auto-rollback is enabled and the upgrade fails during startup, MSF automatically reverts to the previous version.
+
+**Manual rollback** (for applications running but unhealthy):
+```bash
+aws kinesisanalyticsv2 rollback-application \
+    --application-name MyApplication \
+    --current-application-version-id <version-id>
+```
+
+Rollback restores the previous Flink version, previous JAR, and restarts from the last snapshot taken before the upgrade. You cannot restore a Flink 2.2 snapshot on Flink 1.x.
+
+### Rebuild State (for incompatible state)
+
+If state is incompatible and cannot be migrated, start fresh:
+```bash
+aws kinesisanalyticsv2 start-application \
+    --application-name MyApplication \
+    --run-configuration '{
+        "ApplicationRestoreConfiguration": {
+            "ApplicationRestoreType": "SKIP_RESTORE_FROM_SNAPSHOT"
+        }
+    }'
+```
+
 ## Build Process
 
 Set Java 17 before building:
@@ -432,6 +574,24 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17) && mvn clean package -DskipTest
 ```
 
 ## Removed APIs and Migration Paths
+
+### DataSet API Removal
+
+The entire DataSet API for batch processing has been removed. All batch processing must use the unified DataStream API or Table API/SQL:
+
+```java
+// REMOVED - DataSet API
+ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+DataSet<String> data = env.readTextFile("input.txt");
+
+// USE instead - DataStream API or Table API/SQL
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+// Use DataStream API for batch with bounded sources, or Table API/SQL
+```
+
+### Scala API Removal
+
+The Flink Scala API has been removed entirely. Scala-specific wrappers and implicit conversions are no longer available. Use Flink's Java API from Scala code instead.
 
 ### Source API Migration
 
@@ -556,12 +716,21 @@ EventTimeSessionWindows.withGap(Duration.ofMinutes(5));
 
 First-party connectors require 2.x compatible versions. Check connector documentation for migration status:
 
-| Connector | Status |
-|-----------|--------|
-| Kafka | 2.x compatible versions available |
-| Kinesis | 2.x compatible versions available |
-| File System | Updated API |
-| JDBC | Check release notes |
+| Connector | Flink 1.20 Version | Flink 2.0+ Version | Notes |
+|-----------|--------------------|--------------------|-------|
+| Apache Kafka | `flink-connector-kafka` 3.4.0-1.20 | `flink-connector-kafka` 4.0.0-2.0 | Recommended for Flink 2.2 |
+| Kinesis Data Streams (source) | `flink-connector-kinesis` 5.0.0-1.20 | `flink-connector-aws-kinesis-streams` 6.0.0-2.0 | Must be on v5.0+ before upgrade |
+| Kinesis Data Streams (sink) | `flink-connector-aws-kinesis-streams` 5.1.0-1.20 | `flink-connector-aws-kinesis-streams` 6.0.0-2.0 | Recommended for Flink 2.2 |
+| Amazon Data Firehose | `flink-connector-aws-kinesis-firehose` 5.1.0-1.20 | `flink-connector-aws-kinesis-firehose` 6.0.0-2.0 | Compatible with Flink 2.0 |
+| Amazon DynamoDB | `flink-connector-dynamodb` 5.1.0-1.20 | `flink-connector-dynamodb` 6.0.0-2.0 | Compatible with Flink 2.0 |
+| Amazon SQS | `flink-connector-sqs` 5.1.0-1.20 | `flink-connector-sqs` 6.0.0-2.0 | Compatible with Flink 2.0 |
+| FileSystem (S3, HDFS) | Bundled with Flink | Bundled with Flink | Always available |
+| JDBC | `flink-connector-jdbc` 3.3.0-1.20 | Not yet released for 2.x | No Flink 2.x-compatible release |
+| OpenSearch | `flink-connector-opensearch` 1.2.0-1.19 | Not yet released for 2.x | No Flink 2.x-compatible release |
+| Elasticsearch | Legacy connector only | Not yet released for 2.x | Consider migrating to OpenSearch connector |
+| Amazon Managed Service for Prometheus | `flink-connector-prometheus` 1.0.0-1.20 | Not yet released for 2.x | No Flink 2.x-compatible release |
+
+Note: Some connectors were renamed between major versions (e.g., Firehose connector). Always check the MSF connector documentation for exact artifact names.
 
 ## New Features in 2.x
 
@@ -580,17 +749,42 @@ New DataStream API with improved design (not yet production-ready):
 - Better state management primitives
 - Improved type safety
 
-### SQL Enhancements
+### SQL and Table API Enhancements
 
-- C-style escape strings supported
-- New `QUALIFY` clause for filtering window function outputs
-- Table functions usable without `TABLE()` wrapper in `FROM`
+| Feature | Description |
+|---------|-------------|
+| VARIANT data type | Native support for semi-structured data (JSON) without repeated string parsing |
+| Delta Join | Reduces state for streaming joins by maintaining only latest version per key (requires external infrastructure like Apache Fluss) |
+| StreamingMultiJoinOperator | Executes multi-way joins as a single operator, eliminating intermediate materialization |
+| ProcessTableFunction (PTF) | Stateful, event-driven logic directly in SQL with per-key state and timers |
+| ML_PREDICT function | Call registered ML models on streaming/batch tables from SQL (requires bundling a ModelProvider implementation) |
+| Model DDL | Define ML models as first-class catalog objects using `CREATE MODEL` statements |
+| Vector Search | SQL API for searching vector databases (requires custom VectorSearchTableSource implementation) |
+| C-style escape strings | Supported in SQL |
+| QUALIFY clause | Filter window function outputs |
+
+### DataStream API
+
+| Feature | Description |
+|---------|-------------|
+| FLIP-27 Source API | New unified source interface replacing legacy `SourceFunction` |
+| FLIP-143 Sink API | New unified sink interface replacing legacy `SinkFunction` |
+| Async Python DataStream | Non-blocking I/O in Python DataStream API using `AsyncFunction` |
+
+### Runtime
+
+- RocksDB upgraded to 8.10.0 with improved I/O performance
+- Dedicated serializers for Map, List, Set (replacing Kryo-based serialization)
+- Python 3.12 support
 
 ## Quick Reference: Breaking Changes
 
 | Category | 1.x | 2.x |
 |----------|-----|-----|
-| Java version | 8, 11+ | 17+ (21 supported) |
+| Java version | 8, 11+ | 17+ (21 experimental, not supported in MSF) |
+| Python version | 3.8+ | 3.12 (3.8 removed) |
+| Scala API | Available | Removed (use Java API from Scala) |
+| DataSet API | Available | Removed (use DataStream or Table API) |
 | Config file | `flink-conf.yaml` | `config.yaml` (standard YAML) |
 | Source API | `SourceFunction` | New Source API only |
 | Sink API | `SinkFunction`, `SinkV1` | Sink V2 only |
@@ -604,6 +798,42 @@ New DataStream API with improved design (not yet production-ready):
 | TimeCharacteristic | Configurable | Removed (event time default) |
 | IterativeStream | Supported | Removed |
 | keyBy(int) | Supported | Removed (use KeySelector) |
+| Scala case classes state | Kryo v2 serialized | Incompatible (Kryo v5) |
+| Java records state | Kryo v2 fallback | Incompatible (Kryo v5) |
+| MSF filesystem | Writable | Read-only (except `/tmp`) |
+| MSF IMDS | All endpoints | Credential endpoints only |
+| CloudFormation upgrade | Delete and recreate | In-place `RuntimeEnvironment` update |
+
+## MSF Behavioral Changes in Flink 2.2
+
+### Metrics Changes
+
+| Change | Details |
+|--------|---------|
+| `fullRestarts` removed | Use `numRestarts` instead |
+| `uptime` deprecated | Use `runningTime` instead |
+| `downtime` deprecated | Use `restartingTime`, `cancellingTime`, `failingTime` instead |
+| `bytesRequestedPerFetch` removed | Removed in KDS connector v6.0.0 |
+
+### Read-Only Root Filesystem
+
+To improve security, any file write outside of `/tmp` (the default Flink working directory) will fail with `java.io.FileNotFoundException: /{path}/{filename} (Read-only file system)`. This can come from your code directly or from libraries in your dependencies. Override direct filesystem paths to `/tmp/` in your code, and use library configuration overrides to redirect indirect filesystem operations to `/tmp/`.
+
+### Non-Credential IMDS Calls Blocked
+
+Only credential-related IMDS endpoints are allowed (`/latest/meta-data/iam/security-credentials/` and `/latest/dynamic/instance-identity/document`). Applications using other IMDS calls (e.g., `EC2MetadataUtils.getInstanceId()`, `getInstanceType()`, `getLocalHostName()`, `getAvailabilityZone()`) will receive HTTP 4xx errors. Refactor to use environment variables or application configuration instead.
+
+### Programmatic Configuration Handling
+
+MSF Flink 2.2 now throws an exception when you attempt to modify configs not supported by MSF through `env.getConfig().set()` or similar APIs. Supported config changes can still be requested through support tickets.
+
+### Known Issues
+
+**MSF Studio not supported:** Flink 2.2 in MSF does not support Studio (notebook) applications.
+
+**Kinesis EFO resharding bug (FLINK-37648):** Applications using `KinesisStreamsSource` with EFO (SubscribeToShard) may fail when Kinesis streams undergo resharding.
+
+**Kinesis EFO + Sink deadlock (FLINK-34071):** Applications using `KinesisStreamsSource` with EFO together with `KinesisStreamsSink` may experience deadlocks under backpressure, resulting in complete stop of data processing. Recovery requires a force stop and restart.
 
 ## Not Supported Features in Managed Service for Apache Flink
 
