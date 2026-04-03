@@ -435,11 +435,12 @@ public class RobustProcessor extends ProcessFunction<Event, ProcessedEvent> {
 
 ## Configuration Optimization
 
-**Critical Principle**: Managed Service for Apache Flink applications must clearly separate local development configuration from Managed Service for Apache Flink service-level configuration.
+**Critical Principle**: Managed Service for Apache Flink applications must clearly separate local development configuration from Managed Service for Apache Flink service-level configuration. Managed Service for Apache Flink manages all advance Flink runtime parameters (i.e. `FLINK_PROPERTIES` configs such as `state.backend` and `restart-strategy`) and should not be a consideration for developers outside of local development.
 
 - **Local Docker Configuration**: Used only for Kiro-based development with Docker containers
 - **Managed Service for Apache Flink Service Configuration**: Managed through Managed Service for Apache Flink console and service APIs, not in application code
 - **Application Code**: Should be environment-agnostic and avoid hardcoded infrastructure settings
+- **Advanced Configs**: Configurations for the Flink runtime are managed by Managed Service for Apache Flink and should not be a consideration for developers outside of local development - some configurations can be updated via AWS Support Case requests (such as `state.backend` for RocksDB vs. HashMap) but have significant considerations to weigh for application health and stability and in general should be managed by Managed Service for Apache Flink
 
 ### Environment-Specific Configuration Management
 
