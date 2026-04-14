@@ -65,3 +65,10 @@ When creating Flink applications, **always reference multiple relevant files tog
 5. **For job graph design** — Read job-graph-architecture.md for operator chaining, data skew, anti-patterns, and task slot mapping
 6. **For monitoring and observability** — Read monitoring-and-metrics.md for CloudWatch metrics analysis and custom metrics emission, and logging-configuration.md for log configuration
 7. **Cross-reference between documents** — They link to each other for related information
+
+## Support & Legal
+
+* **Documentation**: [Amazon Managed Service for Apache Flink](https://docs.aws.amazon.com/managed-flink/)
+* **Support**: [GitHub Issues](https://github.com/awslabs/managed-service-for-apache-flink-agent-steering-files/issues) and [AWS Support Center](https://console.aws.amazon.com/support/)
+* **License**: Apache-2.0
+* **Privacy Policy**: [AWS Privacy Notice](https://aws.amazon.com/privacy/)
