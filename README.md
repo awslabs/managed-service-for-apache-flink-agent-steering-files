@@ -1,3 +1,8 @@
+# Archived
+
+> [!IMPORTANT]
+> This repository has been archived. Please refer to [developing-applications-on-managed-service-for-apache-flink](https://github.com/aws/agent-toolkit-for-aws/blob/main/skills/specialized-skills/analytics-skills/developing-applications-on-managed-service-for-apache-flink/) instead.
+
 # Amazon Managed Service for Apache Flink — Kiro Power / Agent Skill
 
 Comprehensive guidance for developing, optimizing, and operating Apache Flink applications on AWS Managed Service for Apache Flink. Works as a **Kiro Power** and an **Agent Skill** (compatible with Cursor, Claude Code, and other [Agent Skills](https://agentskills.io/)-compatible agents).
